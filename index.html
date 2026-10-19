@@ -22,12 +22,11 @@
   }
   .marquee {
     border: 3px solid #d4a017; border-radius: 10px; background: rgba(8,50,24,.75);
-    text-align: center; padding: 8px; letter-spacing: 4px; font-size: 18px;
-    color: #e8f5ec; text-transform: uppercase; min-height: 42px;
+    text-align: center; padding: 8px 12px 12px; min-height: 42px;
   }
   .stats { display: flex; justify-content: space-between; font-size: 14px; color: #cfe8d7; }
   .board { display: flex; gap: 6px; justify-content: center; }
-  .clock { text-align: center; font-size: 22px; font-weight: 800; color: #f0c040; margin-bottom: -6px; }
+  .clock { text-align: center; font-size: 22px; font-weight: 800; color: #f0c040; margin-bottom: 6px; }
   .timer { height: 14px; border-radius: 8px; background: #0b3d1f; border: 3px solid #d4a017; overflow: hidden; }
   .timer > div { height: 100%; width: 100%; background: #f0c040; transition: width .1s linear; }
   .play {
@@ -78,11 +77,12 @@
 </head>
 <body>
 <div class="machine">
-  <div class="marquee" id="marquee">Hyper Hold 'Em</div>
+  <div class="marquee">
+    <div class="clock" id="clock">5.0s</div>
+    <div class="timer"><div id="bar"></div></div>
+  </div>
   <div class="stats"><span id="level"></span><span id="score"></span><span id="best"></span></div>
   <div class="board" id="board"></div>
-  <div class="clock" id="clock">5.0s</div>
-  <div class="timer"><div id="bar"></div></div>
   <div class="play" id="play"></div>
   <div class="explain" id="explain"></div>
   <button id="action">Start</button>
@@ -231,7 +231,6 @@ function startLevel() {
   const r = state.round = makeRound(state.level);
   $("explain").style.display = "none";
   $("action").style.display = "none";
-  $("marquee").textContent = "Which hand wins?";
   renderHUD();
   const board = $("board"); board.innerHTML = "";
   r.board.forEach(c => board.appendChild(cardEl(c)));
@@ -305,7 +304,6 @@ function choose(i) {
   const lines = r.hands.map((h, k) => `<li>Hand ${k + 1}: ${cap(describe(h.ev))}${k === r.winner ? " 🏆" : ""}</li>`).join("");
   $("explain").innerHTML = `<h3>${head}</h3>${explainWin(win, lose)}<ul>${lines}</ul>`;
   $("explain").style.display = "block";
-  $("marquee").textContent = cap(CATS[win.cat]);
 
   const btn = $("action"); btn.style.display = "block";
   if (correct) { btn.textContent = "Next level ↵"; state.next = () => { state.level++; startLevel(); }; }
