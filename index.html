@@ -71,6 +71,11 @@
   }
   button:hover { background: #e6b82e; }
   .overlay { text-align: center; display: flex; flex-direction: column; gap: 12px; align-items: center; padding: 20px 8px; }
+  .modes { display: flex; gap: 8px; width: 100%; }
+  .mode { flex: 1; background: rgba(8,50,24,.75); color: #e8f5ec; border: 2px solid #0b3d1f; font-size: 15px; padding: 10px 8px; }
+  .mode small { display: block; font-weight: 400; font-size: 11px; margin-top: 4px; color: #cfe8d7; }
+  .mode:hover { background: rgba(8,50,24,.9); }
+  .mode.active { border-color: #d4a017; background: #0b3d1f; }
   .overlay h1 { margin: 0; letter-spacing: 3px; font-size: 24px; }
   .overlay p { margin: 0; color: #cfe8d7; }
 </style>
@@ -178,9 +183,11 @@ const ordinal = n => ["", "1st", "2nd", "3rd", "4th", "5th"][n];
 
 // ---------- game ----------
 const $ = id => document.getElementById(id);
-let state = { level: 1, score: 0, best: +(localStorage.getItem("holdemBest") || 0), round: null, deadline: 0, bank: 0, barMax: TIME_LIMIT, timer: null, phase: "idle" };
+const BEST_KEY = { hand: "holdemBest", odds: "holdemBestOdds" };
+let state = { mode: "hand", level: 1, score: 0, best: +(localStorage.getItem(BEST_KEY.hand) || 0), round: null, deadline: 0, bank: 0, barMax: TIME_LIMIT, timer: null, phase: "idle" };
 
-function boardSize(l) { return l <= 5 ? 3 : l <= 10 ? 4 : 5; }
+// odds mode only uses the flop and turn, since the river leaves nothing to draw to
+function boardSize(l) { return state.mode === "odds" ? (l <= 5 ? 3 : 4) : (l <= 5 ? 3 : l <= 10 ? 4 : 5); }
 function stageName(l) { return ["", "", "", "Flop", "Flop + Turn", "Flop + Turn + River"][boardSize(l)]; }
 function handsForLevel(l) {
   const into = (l - 1) % 5; // position within a 5-level group
@@ -194,7 +201,54 @@ function newDeck() {
   for (let i = d.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [d[i], d[j]] = [d[j], d[i]]; }
   return d;
 }
+function equity(board, hands) {
+  const taken = [...board, ...hands.flatMap(h => h.hole)];
+  const rest = newDeck().filter(c => !taken.some(t => sameCard(t, c)));
+  const need = 5 - board.length;
+  const share = hands.map(() => 0);
+  let total = 0;
+  const score = extra => {
+    const full = board.concat(extra);
+    const evs = hands.map(h => best7([...h.hole, ...full]));
+    let top = evs[0];
+    for (const e of evs) if (cmp(e, top) > 0) top = e;
+    const w = evs.map((e, i) => cmp(e, top) === 0 ? i : -1).filter(i => i >= 0);
+    w.forEach(i => share[i] += 1 / w.length);
+    total++;
+  };
+  if (need === 1) rest.forEach(c => score([c]));
+  else for (let i = 0; i < rest.length; i++) for (let j = i + 1; j < rest.length; j++) score([rest[i], rest[j]]);
+  return share.map(x => x / total);
+}
+
+function drawsFor(hole, board, cat) {
+  const out = [];
+  const all = [...hole, ...board];
+  if (cat < 5) {
+    for (const su of SUITS) {
+      const n = all.filter(c => c.s === su).length;
+      if (n === 4 && hole.some(c => c.s === su)) out.push("a flush draw");
+    }
+  }
+  if (cat < 4) {
+    const have = new Set(all.map(c => c.r));
+    const holeR = new Set(hole.map(c => c.r));
+    if (have.has(14)) have.add(1);
+    if (holeR.has(14)) holeR.add(1);
+    const outs = new Set();
+    for (let low = 1; low <= 10; low++) {
+      const win = [0, 1, 2, 3, 4].map(k => low + k);
+      const missing = win.filter(x => !have.has(x));
+      if (missing.length === 1 && win.some(x => holeR.has(x))) outs.add(missing[0] === 1 ? 14 : missing[0]);
+    }
+    if (outs.size >= 2) out.push("an open-ended straight draw");
+    else if (outs.size === 1) out.push("a gutshot straight draw");
+  }
+  return out;
+}
+
 function makeRound(level) {
+  if (state.mode === "odds") return makeOddsRound(level);
   const n = handsForLevel(level);
   for (;;) {
     const deck = newDeck();
@@ -211,6 +265,44 @@ function makeRound(level) {
   }
 }
 
+function makeOddsRound(level) {
+  const n = handsForLevel(level);
+  for (;;) {
+    const deck = newDeck();
+    const board = deck.splice(0, boardSize(level));
+    const hands = [];
+    for (let i = 0; i < n; i++) {
+      const hole = deck.splice(0, 2);
+      const ev = best7([...hole, ...board]);
+      hands.push({ hole, ev, draws: drawsFor(hole, board, ev.cat) });
+    }
+    const eq = equity(board, hands);
+    const order = eq.map((_, i) => i).sort((a, b) => eq[b] - eq[a]);
+    // keep the answer clear but not a lock
+    if (eq[order[0]] - eq[order[1]] < 0.05 || eq[order[0]] > 0.85) continue;
+    hands.forEach((h, i) => h.eq = eq[i]);
+    return { board, hands, winner: order[0], runnerUp: order[1] };
+  }
+}
+
+function explainOdds(r) {
+  const pct = x => Math.round(x * 100) + "%";
+  const w = r.hands[r.winner], l = r.hands[r.runnerUp];
+  const wn = r.winner + 1, ln = r.runnerUp + 1;
+  const nowBest = r.hands.map((h, i) => i).sort((a, b) => cmp(r.hands[b].ev, r.hands[a].ev))[0];
+  let why;
+  if (cmp(w.ev, l.ev) < 0) {
+    why = `Hand ${wn} is behind right now (${describe(w.ev)} vs ${describe(l.ev)}), but ` +
+      (w.draws.length ? `${w.draws.join(" and ")} gives it more ways to improve.` : "it has more cards that can improve it.");
+  } else if (r.winner === nowBest && cmp(w.ev, l.ev) > 0) {
+    why = `Hand ${wn} is ahead now (${describe(w.ev)} vs ${describe(l.ev)}) and ` +
+      (l.draws.length ? `stays ahead of ${l.draws.join(" and ")}.` : "has fewer ways to be caught.");
+  } else {
+    why = `Hand ${wn} has the better chances to improve${w.draws.length ? ` with ${w.draws.join(" and ")}` : ""}.`;
+  }
+  return `Hand ${wn} wins about ${pct(w.eq)} of the time vs ${pct(l.eq)} for Hand ${ln}. ${why}`;
+}
+
 function cardEl(c, used) {
   const d = document.createElement("div");
   d.className = "card" + (SUITS.indexOf(c.s) === 1 || SUITS.indexOf(c.s) === 2 ? " red" : "") + (used ? " used" : "");
@@ -221,7 +313,7 @@ function cardEl(c, used) {
 const sameCard = (a, b) => a.r === b.r && a.s === b.s;
 
 function renderHUD() {
-  $("level").textContent = `Level ${state.level} · ${handsForLevel(state.level)} hands · ${stageName(state.level)}`;
+  $("level").textContent = `Level ${state.level} · ${handsForLevel(state.level)} hands · ${stageName(state.level)}${state.mode === "odds" ? " · Odds" : ""}`;
   $("score").textContent = `Score ${state.score}`;
   $("best").textContent = `Best ${state.best}`;
 }
@@ -271,7 +363,7 @@ function choose(i) {
   const correct = i === r.winner;
   let gained = 0;
   if (correct) { gained = 100 + Math.round(Math.max(0, TIME_LIMIT - used) / 20); state.score += gained; }
-  if (state.score > state.best) { state.best = state.score; localStorage.setItem("holdemBest", state.best); }
+  if (state.score > state.best) { state.best = state.score; localStorage.setItem(BEST_KEY[state.mode], state.best); }
   renderHUD();
 
   // reveal: highlight the winning five cards, dim the rest
@@ -280,18 +372,18 @@ function choose(i) {
     el.classList.add("locked");
     if (k === r.winner) el.classList.add("winner");
     else if (k === i) el.classList.add("picked-wrong");
-    el.classList.add("dim");
+    if (state.mode === "hand") el.classList.add("dim");
     const used = r.hands[k].ev.cards;
     el.querySelectorAll(".card").forEach((cEl, ci) => {
       if (used.some(c => sameCard(c, r.hands[k].hole[ci]))) cEl.classList.add("used");
     });
     const lab = document.createElement("span");
     lab.className = "label";
-    lab.textContent = CATS[r.hands[k].ev.cat];
+    lab.textContent = state.mode === "odds" ? Math.round(r.hands[k].eq * 100) + "%" : CATS[r.hands[k].ev.cat];
     el.appendChild(lab);
   });
   [...$("board").children].forEach((cEl, ci) => {
-    const used = r.hands[r.winner].ev.cards.some(c => sameCard(c, r.board[ci]));
+    const used = state.mode === "odds" || r.hands[r.winner].ev.cards.some(c => sameCard(c, r.board[ci]));
     cEl.style.opacity = used ? 1 : .35;
   });
 
@@ -299,10 +391,11 @@ function choose(i) {
   const winnerNum = r.winner + 1;
   let head;
   if (correct) head = `<span class="good">Correct! +${gained}</span>`;
-  else if (i === -1) head = `<span class="bad">Time's up!</span> Hand ${winnerNum} wins.`;
-  else head = `<span class="bad">Wrong.</span> Hand ${winnerNum} wins.`;
-  const lines = r.hands.map((h, k) => `<li>Hand ${k + 1}: ${cap(describe(h.ev))}${k === r.winner ? " 🏆" : ""}</li>`).join("");
-  $("explain").innerHTML = `<h3>${head}</h3>${explainWin(win, lose)}<ul>${lines}</ul>`;
+  else if (i === -1) head = `<span class="bad">Time's up!</span> Hand ${winnerNum} is the favorite.`;
+  else head = `<span class="bad">Wrong.</span> Hand ${winnerNum} ${state.mode === "odds" ? "is the favorite" : "wins"}.`;
+  const odds = state.mode === "odds";
+  const lines = r.hands.map((h, k) => `<li>Hand ${k + 1}: ${cap(describe(h.ev))}${odds ? `${h.draws.length ? ` + ${h.draws.join(", ")}` : ""} — ${Math.round(h.eq * 100)}%` : ""}${k === r.winner ? " 🏆" : ""}</li>`).join("");
+  $("explain").innerHTML = `<h3>${head}</h3>${odds ? explainOdds(r) : explainWin(win, lose)}<ul>${lines}</ul>`;
   $("explain").style.display = "block";
 
   const btn = $("action"); btn.style.display = "block";
@@ -325,11 +418,19 @@ document.addEventListener("keydown", e => {
 });
 
 // intro
-renderHUD();
-$("play").innerHTML = `<div class="overlay"><h1>HYPER HOLD 'EM</h1>
-<p>Community cards on top (flop, then turn, then river). Pick the player with the best hand before time runs out.</p>
-<p>Each hand adds 5 seconds to your clock. Answer fast and the unused time carries over, so your clock can grow. The clock pauses while you read the explanation.</p>
-<p>Click a hand or press 1–4. Every 5 correct answers adds a card. Each stage starts with 2 hands and moves to 3 after 3 levels. 4 hands only appear from level 17.</p></div>`;
+function showIntro() {
+  state.best = +(localStorage.getItem(BEST_KEY[state.mode]) || 0);
+  renderHUD();
+  $("play").innerHTML = `<div class="overlay"><h1>HYPER HOLD 'EM</h1>
+<div class="modes">
+  <button class="mode ${state.mode === "hand" ? "active" : ""}" data-mode="hand">Best hand now<small>Who has the strongest hand right now?</small></button>
+  <button class="mode ${state.mode === "odds" ? "active" : ""}" data-mode="odds">Best odds<small>Who is most likely to win by the river? Flop and turn only.</small></button>
+</div>
+<p>Each hand adds 5 seconds to your clock. Answer fast and the unused time carries over. The clock pauses while you read the explanation.</p>
+<p>Click a hand or press 1–4. Every 5 correct answers adds a card. Each stage starts with 2 hands and moves to 3 after 3 levels.</p></div>`;
+  document.querySelectorAll(".mode").forEach(b => b.addEventListener("click", () => { state.mode = b.dataset.mode; showIntro(); }));
+}
+showIntro();
 </script>
 </body>
 </html>
